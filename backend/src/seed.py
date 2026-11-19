@@ -2,7 +2,7 @@ from sqlalchemy import select
 from .database import Session
 from .models import *
 from .auth import password_hash
-from .algorithm import classify
+from .evidence_service import snapshot,archive
 from .constants import Role
 def seed():
     with Session() as db:
@@ -19,8 +19,11 @@ def seed():
             obs=Observation(accession_id=folio.id,humidity=humidity,holes=holes,mold=mold,note='入藏病害普查');db.add(obs);db.flush()
             cabinet=db.scalar(select(Cabinet).where(Cabinet.code=='Q1' if code!='GB-A033' else Cabinet.code=='Q2'))
             db.add(Isolation(accession_id=folio.id,cabinet_id=cabinet.id))
-            predicted,metrics=classify(humidity,holes,mold)
-            db.add(RiskAssessment(accession_id=folio.id,observation_id=obs.id,status='reviewed',predicted=predicted,approved='low' if code=='GB-A032' else predicted,review_note='主管现场复核',metrics=metrics))
+            frozen=snapshot(humidity,holes,mold,{'humidity':humidity,'holes':holes,'mold':mold,'at':obs.at.isoformat() if obs.at else None,'note':obs.note})
+            row=RiskAssessment(accession_id=folio.id,observation_id=obs.id,status='reviewed',predicted=frozen['predicted'],approved='low' if code=='GB-A032' else frozen['predicted'],review_note='主管现场复核',metrics=frozen['metrics'],provenance=frozen)
+            db.add(row);db.flush()
+            state,reason,name,digest=archive(row)
+            row.evidence_status=state;row.evidence_note=reason;row.evidence_file=name;row.evidence_sha256=digest
             plan=Treatment(accession_id=folio.id,name='缺资大修方案' if code=='GB-A031' else '待验收方案' if code=='GB-A032' else '虫孔修补方案',estimated_cents=1500000 if code=='GB-A031' else 180000,status='completed' if code=='GB-A032' else 'draft');db.add(plan);db.flush()
             parent=None
             for i,n in enumerate(['干燥除霉','虫孔补纸','平整验收'],1):

@@ -53,6 +53,12 @@ class RiskAssessment(Base):
     review_note:Mapped[str]=mapped_column(String(200),default='')
     metrics:Mapped[dict]=mapped_column(JSON,default=dict)
     error:Mapped[str]=mapped_column(String(200),default='')
+    # 分级当时冻结的预测依据：测量值、阈值路径、模型指印。留证与复核都据此核对。
+    provenance:Mapped[dict|None]=mapped_column(JSON,nullable=True)
+    evidence_status:Mapped[str]=mapped_column(String(20),default='pending')
+    evidence_file:Mapped[str]=mapped_column(String(80),default='')
+    evidence_sha256:Mapped[str]=mapped_column(String(64),default='')
+    evidence_note:Mapped[str]=mapped_column(String(200),default='')
 class Treatment(Base):
     __tablename__='treatments'
     __table_args__=(CheckConstraint('estimated_cents > 0'),)

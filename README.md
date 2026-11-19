@@ -8,7 +8,7 @@
 
 1. 入藏册件：唯一馆藏号、书名、年代、纸张；追加病害观测保留历史。已出柜卷册需重新入柜才能录入病害。
 2. 隔离柜：同册只允许一个在柜位置，柜位满时拒绝入柜。出柜释放位置并保存出柜时间。
-3. 风险分级：Redis 排队、Python worker 执行决策树、主管复核；开工和交接只接受最新观测的复核。
+3. 风险分级：Redis 排队、Python worker 执行决策树、主管复核；开工和交接只接受最新观测的复核。分级当时冻结测量值、决策树走过的阈值路径和模型指印，写入 `provenance` 并留证归档；主管改判保留原预测。留证失败不回滚分级，可单独重试，且不覆盖已归档依据、不用现模型补旧账；只存等级的历史记录照常可读，补档时标明缺证。
 4. 修复工序：方案依序建立工序依赖，资金未占用不得施工；前置工序未完成不可跳步；未施工方案撤销后可修订恢复。
 5. 专项经费：预算、占用、实付分别记录；行锁保障并发不超支；撤销返还占款，核销不得超过已占金额。
 6. 出柜借展：霉面积为 0、含水≤60%、最新低风险复核、工序及经费完成才准出柜；先交库房才准借展。
@@ -45,7 +45,9 @@ docker compose exec backend python -m src.seed
 
 ## 算法与数据口径
 
-`backend/src/algorithm.py` 以纸张含水、虫孔数、霉面积三个输入特征运行 `DecisionTreeClassifier(max_depth=5, min_samples_leaf=4, random_state=31)`。固定 seed 生成 600 条专家规则合成样本，按标签分层分出 450 训练 / 150 留出；worker 实算宏 F1、混淆矩阵（行实际 / 列预测，低中高顺序）与数据 SHA256，并写入数据库和共享 artifacts 卷。worker 不在 HTTP 请求内运行，Redis 队列和心跳文件均实际存在。
+`backend/src/algorithm.py` 以纸张含水、虫孔数、霉面积三个输入特征运行 `DecisionTreeClassifier(max_depth=5, min_samples_leaf=4, random_state=31)`，并输出实际走过的阈值路径、特征名与模型指印（`MODEL_VERSION`，随训练数据/参数/版本变化）。固定 seed 生成 600 条专家规则合成样本，按标签分层分出 450 训练 / 150 留出；worker 实算宏 F1、混淆矩阵（行实际 / 列预测，低中高顺序）与数据 SHA256，并写入数据库和共享 artifacts 卷。worker 不在 HTTP 请求内运行，Redis 队列和心跳文件均实际存在。
+
+`backend/src/evidence_service.py` 负责留证：`snapshot()` 冻结分级当时的测量、阈值路径、指标与模型指印；`verify()` 只有在模型指印与快照一致、且能重放出同一等级和同一路径时才允许补档；`archive()` 以独占方式创建 `risk-<id>-evidence.json`，已有文件内容不同则拒绝覆盖。worker 先提交等级再留证，留证失败只更新 `evidence_status/evidence_note`，复核照常，重试不覆盖已归档依据。`POST /risks/{id}/evidence/retry` 由修复员或主管触发，`GET /risks/{id}/evidence` 供只读查阅。新增列为 `provenance`、`evidence_status`、`evidence_file`、`evidence_sha256`、`evidence_note`；`backend/src/migrations.py` 启动时给旧库补列，并把只存等级的旧单标为缺证。
 
 合成样本用于内部可复现检查，不代表真实文保预测效果。现场主管保留最终复核权。观测不存在、未隔离、旧观测复核、预算不足、工序不完及病害未清均是独立业务拒绝条件。后台运行失败记录 `failed` 和原因，修复输入后重新提交分级。
 
@@ -61,7 +63,7 @@ docker compose exec backend python -m src.seed
 
 `backend/src/models.py` 是关系模型，`schemas.py` 是输入契约；`catalog_service.py`、`isolation_service.py`、`risk_service.py`、`treatment_service.py`、`grant_service.py`、`handover_service.py` 分别维护六模块约束，`routes.py` 只映射权限和业务调用。建表在首次启动创建，适合独立演示库。
 
-`frontend/src/pages/` 对应六模块；`components/folio-index.js` 复用卷册索引和选择器，`ledger.js` 复用表格与表单字段，`steps.js` 绘制真实工序依赖。`api/client.js` 统一请求，`stores/workspace.js` 持有会话与卷宗，`utils/format.js` 和 `utils/forms.js` 分别处理展示和可恢复表单状态。双字体是 Noto Serif SC 与 Noto Sans SC；网络不通时浏览器使用 serif / sans-serif 回退。
+`frontend/src/pages/` 对应六模块；风险页逐行展示当时测量、决策树阈值路径、原预测与主管改判，以及留证状态与补档入口。`components/folio-index.js` 复用卷册索引和选择器，`ledger.js` 复用表格与表单字段，`steps.js` 绘制真实工序依赖。`api/client.js` 统一请求，`stores/workspace.js` 持有会话与卷宗，`utils/format.js` 和 `utils/forms.js` 分别处理展示和可恢复表单状态。双字体是 Noto Serif SC 与 Noto Sans SC；网络不通时浏览器使用 serif / sans-serif 回退。
 
 共享枚举：后端 `backend/src/constants.py` 的 Role/FolioState/PlanState，分别在 seed 和模型默认值引用；前端 `frontend/src/constants/enums.js` 的 roles/folioStates/planStates 由外壳和页面引用。状态值逐一对应：operator/supervisor/viewer；registered/isolated/repair/released；draft/funded/completed/cancelled。风险值 low/medium/high 在算法与前端等级标签中一致。
 
@@ -80,6 +82,6 @@ docker compose down -v --remove-orphans
 
 ## 已知范围
 
-当前单所业务，工序为有序依赖链；已开始施工的方案不能撤销，追加费用需要另行方案。借展提供放行与一次交接记录，尚未涵盖展期运输、归还登记、真实财务支付与硬件湿度采集。没有真实馆藏训练集、外部效度验证或临床式保证。初始化采用 create_all，无历史版本迁移链。
+当前单所业务，工序为有序依赖链；已开始施工的方案不能撤销，追加费用需要另行方案。借展提供放行与一次交接记录，尚未涵盖展期运输、归还登记、真实财务支付与硬件湿度采集。没有真实馆藏训练集、外部效度验证或临床式保证。初始化采用 create_all，风险分级表的新列由启动时轻量迁移补齐，其余表仍无历史版本迁移链。留证只对能重放核对的快照补档；旧单或快照被改动时登记缺证，不做推测性补算。
 
 License: MIT，见 LICENSE。

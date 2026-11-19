@@ -10,6 +10,8 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(app):
     Base.metadata.create_all(engine)
+    from .migrations import migrate
+    migrate()
     if os.getenv('SEED_DEMO','true')=='true':
         try:
             from .seed import seed
